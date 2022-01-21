@@ -30,6 +30,7 @@ import java.net.URLEncoder;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -49,6 +50,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.hadoop.hbase.RegionException;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
@@ -527,6 +529,9 @@ public class HFileOutputFormat2
     // so we need to remove it. Otherwise we would end up with an
     // empty reducer with index 0
     TreeSet<ImmutableBytesWritable> sorted = new TreeSet<>(startKeys);
+    if(checkHasSameStartKey(startKeys,sorted.size())){
+      throw new RegionException("Some regions have same startkey.");
+    }
     ImmutableBytesWritable first = sorted.first();
     if (writeMultipleTables) {
       first =
@@ -552,6 +557,32 @@ public class HFileOutputFormat2
     } finally {
       writer.close();
     }
+  }
+
+  /**
+   * if startKeys size bigger than sorted size, print same start key and same count
+   * @return true if hase same start key
+   */
+  private static boolean checkHasSameStartKey(List<ImmutableBytesWritable> startKeys, int sortedSize){
+      boolean hasSameStartKey = false;
+      if(startKeys.size() > sortedSize){
+          Map<ImmutableBytesWritable, Integer> keyCountMap = new HashMap<>();
+          for (ImmutableBytesWritable startKey : startKeys) {
+              if(keyCountMap.containsKey(startKey)){
+                  keyCountMap.put(startKey, keyCountMap.get(startKey) + 1);
+                }else {
+                  keyCountMap.put(startKey, 1);
+                }
+            }
+          for (Entry<ImmutableBytesWritable, Integer> entry : keyCountMap.entrySet()) {
+              if(entry.getValue() > 1){
+                  hasSameStartKey = true;
+                  String keyStr=Bytes.toString(entry.getKey().get());
+                  LOG.error("Startkey {} count {}, should be 1.", keyStr, entry.getValue());
+                }
+            }
+        }
+      return hasSameStartKey;
   }
 
   /**
