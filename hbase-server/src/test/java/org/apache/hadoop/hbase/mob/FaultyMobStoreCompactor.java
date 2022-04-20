@@ -25,9 +25,8 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
-import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -37,6 +36,7 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.io.hfile.CorruptHFileException;
+import org.apache.hadoop.hbase.regionserver.CellSink;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
@@ -44,6 +44,7 @@ import org.apache.hadoop.hbase.regionserver.ScannerContext;
 import org.apache.hadoop.hbase.regionserver.ShipperListener;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.regionserver.compactions.CloseChecker;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionProgress;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputControlUtil;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -51,6 +52,7 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.yetus.audience.InterfaceAudience;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 /**
  * This class is used for testing only. The main purpose is to emulate
  * random failures during MOB compaction process.
@@ -80,7 +82,6 @@ public class FaultyMobStoreCompactor extends DefaultMobStoreCompactor {
   public static AtomicLong totalMajorCompactions = new AtomicLong();
 
   static double failureProb = 0.1d;
-  static Random rnd = new Random();
 
   public FaultyMobStoreCompactor(Configuration conf, HStore store) {
     super(conf, store);
@@ -88,9 +89,9 @@ public class FaultyMobStoreCompactor extends DefaultMobStoreCompactor {
   }
 
   @Override
-  protected boolean performCompaction(FileDetails fd, InternalScanner scanner,
+  protected boolean performCompaction(FileDetails fd, InternalScanner scanner, CellSink writer,
       long smallestReadPoint, boolean cleanSeqId, ThroughputController throughputController,
-      boolean major, int numofFilesToCompact) throws IOException {
+      boolean major, int numofFilesToCompact, CompactionProgress progress) throws IOException {
 
     totalCompactions.incrementAndGet();
     if (major) {
@@ -108,7 +109,7 @@ public class FaultyMobStoreCompactor extends DefaultMobStoreCompactor {
     boolean mustFail = false;
     if (compactMOBs) {
       mobCounter.incrementAndGet();
-      double dv = rnd.nextDouble();
+      double dv = ThreadLocalRandom.current().nextDouble();
       if (dv < failureProb) {
         mustFail = true;
         totalFailures.incrementAndGet();
@@ -150,7 +151,7 @@ public class FaultyMobStoreCompactor extends DefaultMobStoreCompactor {
     long counter = 0;
     long countFailAt = -1;
     if (mustFail) {
-      countFailAt = rnd.nextInt(100); // randomly fail fast
+      countFailAt = ThreadLocalRandom.current().nextInt(100); // randomly fail fast
     }
 
     try {

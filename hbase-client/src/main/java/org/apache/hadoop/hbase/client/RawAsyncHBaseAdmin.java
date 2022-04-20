@@ -21,6 +21,7 @@ import static org.apache.hadoop.hbase.HConstants.HIGH_QOS;
 import static org.apache.hadoop.hbase.TableName.META_TABLE_NAME;
 import static org.apache.hadoop.hbase.util.FutureUtils.addListener;
 import static org.apache.hadoop.hbase.util.FutureUtils.unwrapCompletionException;
+
 import edu.umd.cs.findbugs.annotations.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -230,10 +231,14 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.MergeTable
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.MergeTableRegionsResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyColumnRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyColumnResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyColumnStoreFileTrackerRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyColumnStoreFileTrackerResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyNamespaceRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyNamespaceResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyTableRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyTableResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyTableStoreFileTrackerRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.ModifyTableStoreFileTrackerResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.MoveRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.MoveRegionResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.NormalizeRequest;
@@ -359,7 +364,7 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
 
   private final long pauseNs;
 
-  private final long pauseForCQTBENs;
+  private final long pauseNsForServerOverloaded;
 
   private final int maxAttempts;
 
@@ -375,15 +380,15 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     this.rpcTimeoutNs = builder.rpcTimeoutNs;
     this.operationTimeoutNs = builder.operationTimeoutNs;
     this.pauseNs = builder.pauseNs;
-    if (builder.pauseForCQTBENs < builder.pauseNs) {
+    if (builder.pauseNsForServerOverloaded < builder.pauseNs) {
       LOG.warn(
-        "Configured value of pauseForCQTBENs is {} ms, which is less than" +
+        "Configured value of pauseNsForServerOverloaded is {} ms, which is less than" +
           " the normal pause value {} ms, use the greater one instead",
-        TimeUnit.NANOSECONDS.toMillis(builder.pauseForCQTBENs),
+        TimeUnit.NANOSECONDS.toMillis(builder.pauseNsForServerOverloaded),
         TimeUnit.NANOSECONDS.toMillis(builder.pauseNs));
-      this.pauseForCQTBENs = builder.pauseNs;
+      this.pauseNsForServerOverloaded = builder.pauseNs;
     } else {
-      this.pauseForCQTBENs = builder.pauseForCQTBENs;
+      this.pauseNsForServerOverloaded = builder.pauseNsForServerOverloaded;
     }
     this.maxAttempts = builder.maxAttempts;
     this.startLogErrorsCnt = builder.startLogErrorsCnt;
@@ -394,7 +399,8 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     return this.connection.callerFactory.<T> masterRequest()
       .rpcTimeout(rpcTimeoutNs, TimeUnit.NANOSECONDS)
       .operationTimeout(operationTimeoutNs, TimeUnit.NANOSECONDS)
-      .pause(pauseNs, TimeUnit.NANOSECONDS).pauseForCQTBE(pauseForCQTBENs, TimeUnit.NANOSECONDS)
+      .pause(pauseNs, TimeUnit.NANOSECONDS)
+      .pauseForServerOverloaded(pauseNsForServerOverloaded, TimeUnit.NANOSECONDS)
       .maxAttempts(maxAttempts).startLogErrorsCnt(startLogErrorsCnt);
   }
 
@@ -402,7 +408,8 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     return this.connection.callerFactory.<T> adminRequest()
       .rpcTimeout(rpcTimeoutNs, TimeUnit.NANOSECONDS)
       .operationTimeout(operationTimeoutNs, TimeUnit.NANOSECONDS)
-      .pause(pauseNs, TimeUnit.NANOSECONDS).pauseForCQTBE(pauseForCQTBENs, TimeUnit.NANOSECONDS)
+      .pause(pauseNs, TimeUnit.NANOSECONDS)
+      .pauseForServerOverloaded(pauseNsForServerOverloaded, TimeUnit.NANOSECONDS)
       .maxAttempts(maxAttempts).startLogErrorsCnt(startLogErrorsCnt);
   }
 
@@ -661,6 +668,18 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
   }
 
   @Override
+  public CompletableFuture<Void> modifyTableStoreFileTracker(TableName tableName, String dstSFT) {
+    return this
+      .<ModifyTableStoreFileTrackerRequest, ModifyTableStoreFileTrackerResponse> procedureCall(
+        tableName,
+        RequestConverter.buildModifyTableStoreFileTrackerRequest(tableName, dstSFT,
+          ng.getNonceGroup(), ng.newNonce()),
+        (s, c, req, done) -> s.modifyTableStoreFileTracker(c, req, done),
+        (resp) -> resp.getProcId(),
+        new ModifyTableStoreFileTrackerProcedureBiConsumer(this, tableName));
+  }
+
+  @Override
   public CompletableFuture<Void> deleteTable(TableName tableName) {
     return this.<DeleteTableRequest, DeleteTableResponse> procedureCall(tableName,
       RequestConverter.buildDeleteTableRequest(tableName, ng.getNonceGroup(), ng.newNonce()),
@@ -806,6 +825,19 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
       RequestConverter.buildModifyColumnRequest(tableName, columnFamily, ng.getNonceGroup(),
         ng.newNonce()), (s, c, req, done) -> s.modifyColumn(c, req, done),
       (resp) -> resp.getProcId(), new ModifyColumnFamilyProcedureBiConsumer(tableName));
+  }
+
+  @Override
+  public CompletableFuture<Void> modifyColumnFamilyStoreFileTracker(TableName tableName,
+    byte[] family, String dstSFT) {
+    return this
+      .<ModifyColumnStoreFileTrackerRequest, ModifyColumnStoreFileTrackerResponse> procedureCall(
+        tableName,
+        RequestConverter.buildModifyColumnStoreFileTrackerRequest(tableName, family, dstSFT,
+          ng.getNonceGroup(), ng.newNonce()),
+        (s, c, req, done) -> s.modifyColumnStoreFileTracker(c, req, done),
+        (resp) -> resp.getProcId(),
+        new ModifyColumnFamilyStoreFileTrackerProcedureBiConsumer(tableName));
   }
 
   @Override
@@ -1871,49 +1903,65 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
       return failedFuture(e);
     }
     CompletableFuture<Void> future = new CompletableFuture<>();
-    final SnapshotRequest request = SnapshotRequest.newBuilder().setSnapshot(snapshot).build();
-    addListener(this.<Long> newMasterCaller()
-      .action((controller, stub) -> this.<SnapshotRequest, SnapshotResponse, Long> call(controller,
-        stub, request, (s, c, req, done) -> s.snapshot(c, req, done),
-        resp -> resp.getExpectedTimeout()))
-      .call(), (expectedTimeout, err) -> {
+    final SnapshotRequest request =
+      SnapshotRequest.newBuilder().setSnapshot(snapshot).setNonceGroup(ng.getNonceGroup())
+        .setNonce(ng.newNonce()).build();
+    addListener(this.<SnapshotResponse> newMasterCaller()
+      .action((controller, stub) ->
+        this.<SnapshotRequest, SnapshotResponse, SnapshotResponse> call(controller, stub,
+          request, (s, c, req, done) -> s.snapshot(c, req, done), resp -> resp))
+      .call(), (resp, err) -> {
         if (err != null) {
           future.completeExceptionally(err);
           return;
         }
-        TimerTask pollingTask = new TimerTask() {
-          int tries = 0;
-          long startTime = EnvironmentEdgeManager.currentTime();
-          long endTime = startTime + expectedTimeout;
-          long maxPauseTime = expectedTimeout / maxAttempts;
-
-          @Override
-          public void run(Timeout timeout) throws Exception {
-            if (EnvironmentEdgeManager.currentTime() < endTime) {
-              addListener(isSnapshotFinished(snapshotDesc), (done, err2) -> {
-                if (err2 != null) {
-                  future.completeExceptionally(err2);
-                } else if (done) {
-                  future.complete(null);
-                } else {
-                  // retry again after pauseTime.
-                  long pauseTime =
-                    ConnectionUtils.getPauseTime(TimeUnit.NANOSECONDS.toMillis(pauseNs), ++tries);
-                  pauseTime = Math.min(pauseTime, maxPauseTime);
-                  AsyncConnectionImpl.RETRY_TIMER.newTimeout(this, pauseTime,
-                    TimeUnit.MILLISECONDS);
-                }
-              });
-            } else {
-              future.completeExceptionally(
-                new SnapshotCreationException("Snapshot '" + snapshot.getName() +
-                  "' wasn't completed in expectedTime:" + expectedTimeout + " ms", snapshotDesc));
-            }
-          }
-        };
-        AsyncConnectionImpl.RETRY_TIMER.newTimeout(pollingTask, 1, TimeUnit.MILLISECONDS);
+        waitSnapshotFinish(snapshotDesc, future, resp);
       });
     return future;
+  }
+
+  // This is for keeping compatibility with old implementation.
+  // If there is a procId field in the response, then the snapshot will be operated with a
+  // SnapshotProcedure, otherwise the snapshot will be coordinated by zk.
+  private void waitSnapshotFinish(SnapshotDescription snapshot,
+      CompletableFuture<Void> future, SnapshotResponse resp) {
+    if (resp.hasProcId()) {
+      getProcedureResult(resp.getProcId(), future, 0);
+      addListener(future, new SnapshotProcedureBiConsumer(snapshot.getTableName()));
+    } else {
+      long expectedTimeout = resp.getExpectedTimeout();
+      TimerTask pollingTask = new TimerTask() {
+        int tries = 0;
+        long startTime = EnvironmentEdgeManager.currentTime();
+        long endTime = startTime + expectedTimeout;
+        long maxPauseTime = expectedTimeout / maxAttempts;
+
+        @Override
+        public void run(Timeout timeout) throws Exception {
+          if (EnvironmentEdgeManager.currentTime() < endTime) {
+            addListener(isSnapshotFinished(snapshot), (done, err2) -> {
+              if (err2 != null) {
+                future.completeExceptionally(err2);
+              } else if (done) {
+                future.complete(null);
+              } else {
+                // retry again after pauseTime.
+                long pauseTime = ConnectionUtils
+                  .getPauseTime(TimeUnit.NANOSECONDS.toMillis(pauseNs), ++tries);
+                pauseTime = Math.min(pauseTime, maxPauseTime);
+                AsyncConnectionImpl.RETRY_TIMER
+                  .newTimeout(this, pauseTime, TimeUnit.MILLISECONDS);
+              }
+            });
+          } else {
+            future.completeExceptionally(new SnapshotCreationException(
+              "Snapshot '" + snapshot.getName() + "' wasn't completed in expectedTime:"
+                + expectedTimeout + " ms", snapshot));
+          }
+        }
+      };
+      AsyncConnectionImpl.RETRY_TIMER.newTimeout(pollingTask, 1, TimeUnit.MILLISECONDS);
+    }
   }
 
   @Override
@@ -2590,7 +2638,20 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
 
     @Override
     String getOperationType() {
-      return "ENABLE";
+      return "MODIFY";
+    }
+  }
+
+  private static class ModifyTableStoreFileTrackerProcedureBiConsumer
+    extends TableProcedureBiConsumer {
+
+    ModifyTableStoreFileTrackerProcedureBiConsumer(AsyncAdmin admin, TableName tableName) {
+      super(tableName);
+    }
+
+    @Override
+    String getOperationType() {
+      return "MODIFY_TABLE_STORE_FILE_TRACKER";
     }
   }
 
@@ -2684,6 +2745,19 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     }
   }
 
+  private static class ModifyColumnFamilyStoreFileTrackerProcedureBiConsumer
+    extends TableProcedureBiConsumer {
+
+    ModifyColumnFamilyStoreFileTrackerProcedureBiConsumer(TableName tableName) {
+      super(tableName);
+    }
+
+    @Override
+    String getOperationType() {
+      return "MODIFY_COLUMN_FAMILY_STORE_FILE_TRACKER";
+    }
+  }
+
   private static class CreateNamespaceProcedureBiConsumer extends NamespaceProcedureBiConsumer {
 
     CreateNamespaceProcedureBiConsumer(String namespaceName) {
@@ -2743,6 +2817,18 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
       return "SPLIT_REGION";
     }
   }
+
+  private static class SnapshotProcedureBiConsumer extends TableProcedureBiConsumer {
+    SnapshotProcedureBiConsumer(TableName tableName) {
+      super(tableName);
+    }
+
+    @Override
+    String getOperationType() {
+      return "SNAPSHOT";
+    }
+  }
+
 
   private static class ReplicationProcedureBiConsumer extends ProcedureBiConsumer {
     private final String peerId;
@@ -3467,7 +3553,8 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
     return this.connection.callerFactory.<T> serverRequest()
       .rpcTimeout(rpcTimeoutNs, TimeUnit.NANOSECONDS)
       .operationTimeout(operationTimeoutNs, TimeUnit.NANOSECONDS)
-      .pause(pauseNs, TimeUnit.NANOSECONDS).pauseForCQTBE(pauseForCQTBENs, TimeUnit.NANOSECONDS)
+      .pause(pauseNs, TimeUnit.NANOSECONDS)
+      .pauseForServerOverloaded(pauseNsForServerOverloaded, TimeUnit.NANOSECONDS)
       .maxAttempts(maxAttempts).startLogErrorsCnt(startLogErrorsCnt);
   }
 
@@ -4282,5 +4369,4 @@ class RawAsyncHBaseAdmin implements AsyncAdmin {
         return CompletableFuture.completedFuture(Collections.emptyList());
     }
   }
-
 }

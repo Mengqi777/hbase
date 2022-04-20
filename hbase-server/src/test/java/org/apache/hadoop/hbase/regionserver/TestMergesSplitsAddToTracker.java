@@ -18,15 +18,18 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import static org.apache.hadoop.hbase.regionserver.storefiletracker.StoreFileTrackerFactory.TRACKER_IMPL;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasProperty;
+import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
-import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -43,7 +46,7 @@ import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
-import org.apache.hadoop.hbase.regionserver.storefiletracker.TestStoreFileTracker;
+import org.apache.hadoop.hbase.regionserver.storefiletracker.StoreFileTrackerForTest;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -86,13 +89,13 @@ public class TestMergesSplitsAddToTracker {
 
   @Before
   public void setup(){
-    TestStoreFileTracker.clear();
+    StoreFileTrackerForTest.clear();
   }
 
   private TableName createTable(byte[] splitKey) throws IOException {
     TableDescriptor td = TableDescriptorBuilder.newBuilder(name.getTableName())
       .setColumnFamily(ColumnFamilyDescriptorBuilder.of(FAMILY_NAME))
-      .setValue(TRACKER_IMPL, TestStoreFileTracker.class.getName()).build();
+      .setValue(TRACKER_IMPL, StoreFileTrackerForTest.class.getName()).build();
     if (splitKey != null) {
       TEST_UTIL.getAdmin().createTable(td, new byte[][] { splitKey });
     } else {
@@ -222,26 +225,18 @@ public class TestMergesSplitsAddToTracker {
     return new Pair<>(fileInfo, copyName);
   }
 
-  private void validateDaughterRegionsFiles(HRegion region, String orignalFileName,
+  private void validateDaughterRegionsFiles(HRegion region, String originalFileName,
       String untrackedFile) throws IOException {
     //verify there's no link for the untracked, copied file in first region
     List<StoreFileInfo> infos = region.getRegionFileSystem().getStoreFiles("info");
-    final MutableBoolean foundLink = new MutableBoolean(false);
-    infos.stream().forEach(i -> {
-      i.getActiveFileName().contains(orignalFileName);
-      if(i.getActiveFileName().contains(untrackedFile)){
-        fail();
-      }
-      if(i.getActiveFileName().contains(orignalFileName)){
-        foundLink.setTrue();
-      }
-    });
-    assertTrue(foundLink.booleanValue());
+    assertThat(infos, everyItem(hasProperty("activeFileName", not(containsString(untrackedFile)))));
+    assertThat(infos, hasItem(hasProperty("activeFileName", containsString(originalFileName))));
   }
 
   private void verifyFilesAreTracked(Path regionDir, FileSystem fs) throws Exception {
     for (FileStatus f : fs.listStatus(new Path(regionDir, FAMILY_NAME_STR))) {
-      assertTrue(TestStoreFileTracker.tracked(regionDir.getName(), FAMILY_NAME_STR, f.getPath()));
+      assertTrue(
+        StoreFileTrackerForTest.tracked(regionDir.getName(), FAMILY_NAME_STR, f.getPath()));
     }
   }
 

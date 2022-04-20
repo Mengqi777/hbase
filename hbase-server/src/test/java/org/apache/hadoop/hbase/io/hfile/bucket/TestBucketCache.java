@@ -31,8 +31,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
@@ -80,8 +80,6 @@ public class TestBucketCache {
   @ClassRule
   public static final HBaseClassTestRule CLASS_RULE =
       HBaseClassTestRule.forClass(TestBucketCache.class);
-
-  private static final Random RAND = new Random();
 
   @Parameterized.Parameters(name = "{index}: blockSize={0}, bucketSizes={1}")
   public static Iterable<Object[]> data() {
@@ -162,7 +160,7 @@ public class TestBucketCache {
    * Return a random element from {@code a}.
    */
   private static <T> T randFrom(List<T> a) {
-    return a.get(RAND.nextInt(a.size()));
+    return a.get(ThreadLocalRandom.current().nextInt(a.size()));
   }
 
   @Test
@@ -686,7 +684,8 @@ public class TestBucketCache {
 
     Assert.assertEquals(0, allocator.getUsedSize());
     try {
-      re.writeToCache(ioEngine, allocator, null, null);
+      re.writeToCache(ioEngine, allocator, null, null,
+        ByteBuffer.allocate(HFileBlock.BLOCK_METADATA_SPACE));
       Assert.fail();
     } catch (Exception e) {
     }

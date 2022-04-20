@@ -478,6 +478,7 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
         return;
       }
       LOG.info("Scanner lease {} expired {}", this.scannerName, rsh);
+      server.getMetrics().incrScannerLeaseExpired();
       RegionScanner s = rsh.s;
       HRegion region = null;
       try {
@@ -1937,8 +1938,9 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
         throw new ServiceException(ie);
       }
       // We are assigning meta, wait a little for regionserver to finish initialization.
-      int timeout = server.getConfiguration().getInt(HConstants.HBASE_RPC_TIMEOUT_KEY,
-        HConstants.DEFAULT_HBASE_RPC_TIMEOUT) >> 2; // Quarter of RPC timeout
+      // Default to quarter of RPC timeout
+      int timeout = server.getConfiguration()
+        .getInt(HConstants.HBASE_RPC_TIMEOUT_KEY, HConstants.DEFAULT_HBASE_RPC_TIMEOUT) >> 2;
       long endTime = EnvironmentEdgeManager.currentTime() + timeout;
       synchronized (server.online) {
         try {
@@ -3201,8 +3203,16 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
     RegionScannerImpl coreScanner = region.getScanner(scan);
     Shipper shipper = coreScanner;
     RegionScanner scanner = coreScanner;
-    if (region.getCoprocessorHost() != null) {
-      scanner = region.getCoprocessorHost().postScannerOpen(scan, scanner);
+    try {
+      if (region.getCoprocessorHost() != null) {
+        scanner = region.getCoprocessorHost().postScannerOpen(scan, scanner);
+      }
+    } catch (Exception e) {
+      // Although region coprocessor is for advanced users and they should take care of the
+      // implementation to not damage the HBase system, closing the scanner on exception here does
+      // not have any bad side effect, so let's do it
+      scanner.close();
+      throw e;
     }
     long scannerId = scannerIdGenerator.generateNewScannerId();
     builder.setScannerId(scannerId);
@@ -3306,7 +3316,7 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
     // This is cells inside a row. Default size is 10 so if many versions or many cfs,
     // then we'll resize. Resizings show in profiler. Set it higher than 10. For now
     // arbitrary 32. TODO: keep record of general size of results being returned.
-    List<Cell> values = new ArrayList<>(32);
+    ArrayList<Cell> values = new ArrayList<>(32);
     region.startRegionOperation(Operation.SCAN);
     long before = EnvironmentEdgeManager.currentTime();
     // Used to check if we've matched the row limit set on the Scan
@@ -3367,9 +3377,16 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
           // reset the batch progress between nextRaw invocations since we don't want the
           // batch progress from previous calls to affect future calls
           scannerContext.setBatchProgress(0);
+          assert values.isEmpty();
 
           // Collect values to be returned here
           moreRows = scanner.nextRaw(values, scannerContext);
+          if (context == null) {
+            // When there is no RpcCallContext,copy EC to heap, then the scanner would close,
+            // This can be an EXPENSIVE call. It may make an extra copy from offheap to onheap
+            // buffers.See more details in HBASE-26036.
+            CellUtil.cloneIfNecessary(values);
+          }
           numOfNextRawCalls++;
 
           if (!values.isEmpty()) {
@@ -3726,11 +3743,22 @@ public class RSRpcServices extends HBaseRpcServicesBase<HRegionServer>
         if (context != null) {
           context.setCallBack(rsh.shippedCallback);
         } else {
-          // When context != null, adding back the lease will be done in callback set above.
-          addScannerLeaseBack(lease);
+          // If context is null,here we call rsh.shippedCallback directly to reuse the logic in
+          // rsh.shippedCallback to release the internal resources in rsh,and lease is also added
+          // back to regionserver's LeaseManager in rsh.shippedCallback.
+          runShippedCallback(rsh);
         }
       }
       quota.close();
+    }
+  }
+
+  private void runShippedCallback(RegionScannerHolder rsh) throws ServiceException {
+    assert rsh.shippedCallback != null;
+    try {
+      rsh.shippedCallback.run();
+    } catch (IOException ioe) {
+      throw new ServiceException(ioe);
     }
   }
 

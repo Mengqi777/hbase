@@ -17,13 +17,18 @@
  */
 package org.apache.hadoop.hbase.client.trace.hamcrest;
 
+import static org.apache.hadoop.hbase.client.trace.hamcrest.AttributesMatchers.containsEntry;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.sdk.trace.data.EventData;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.data.StatusData;
+import io.opentelemetry.semconv.trace.attributes.SemanticAttributes;
+import java.time.Duration;
+import java.util.Objects;
 import org.hamcrest.Description;
 import org.hamcrest.FeatureMatcher;
 import org.hamcrest.Matcher;
@@ -46,6 +51,16 @@ public final class SpanDataMatchers {
     };
   }
 
+  public static Matcher<SpanData> hasDuration(Matcher<Duration> matcher) {
+    return new FeatureMatcher<SpanData, Duration>(
+      matcher, "SpanData having duration that ", "duration") {
+      @Override
+      protected Duration featureValueOf(SpanData item) {
+        return Duration.ofNanos(item.getEndEpochNanos() - item.getStartEpochNanos());
+      }
+    };
+  }
+
   public static Matcher<SpanData> hasEnded() {
     return new TypeSafeMatcher<SpanData>() {
       @Override protected boolean matchesSafely(SpanData item) {
@@ -53,6 +68,33 @@ public final class SpanDataMatchers {
       }
       @Override public void describeTo(Description description) {
         description.appendText("SpanData that hasEnded");
+      }
+    };
+  }
+
+  public static Matcher<SpanData> hasEvents(Matcher<Iterable<? super EventData>> matcher) {
+    return new FeatureMatcher<SpanData, Iterable<? super EventData>>(
+      matcher, "SpanData having events that", "events") {
+      @Override protected Iterable<? super EventData> featureValueOf(SpanData item) {
+        return item.getEvents();
+      }
+    };
+  }
+
+  public static Matcher<SpanData> hasExceptionWithType(Matcher<? super String> matcher) {
+    return hasException(containsEntry(is(SemanticAttributes.EXCEPTION_TYPE), matcher));
+  }
+
+  public static Matcher<SpanData> hasException(Matcher<? super Attributes> matcher) {
+    return new FeatureMatcher<SpanData, Attributes>(matcher,
+      "SpanData having Exception with Attributes that", "exception attributes") {
+      @Override protected Attributes featureValueOf(SpanData actual) {
+        return actual.getEvents()
+          .stream()
+          .filter(e -> Objects.equals(SemanticAttributes.EXCEPTION_EVENT_NAME, e.getName()))
+          .map(EventData::getAttributes)
+          .findFirst()
+          .orElse(null);
       }
     };
   }
@@ -78,6 +120,24 @@ public final class SpanDataMatchers {
     };
   }
 
+  public static Matcher<SpanData> hasParentSpanId(String parentSpanId) {
+    return hasParentSpanId(equalTo(parentSpanId));
+  }
+
+  public static Matcher<SpanData> hasParentSpanId(SpanData parent) {
+    return hasParentSpanId(parent.getSpanId());
+  }
+
+  public static Matcher<SpanData> hasParentSpanId(Matcher<String> matcher) {
+    return new FeatureMatcher<SpanData, String>(matcher, "SpanKind with a parentSpanId that",
+      "parentSpanId"
+    ) {
+      @Override protected String featureValueOf(SpanData item) {
+        return item.getParentSpanId();
+      }
+    };
+  }
+
   public static Matcher<SpanData> hasStatusWithCode(StatusCode statusCode) {
     final Matcher<StatusCode> matcher = is(equalTo(statusCode));
     return new TypeSafeMatcher<SpanData>() {
@@ -89,6 +149,19 @@ public final class SpanDataMatchers {
       }
       @Override public void describeTo(Description description) {
         description.appendText("SpanData with StatusCode that ").appendDescriptionOf(matcher);
+      }
+    };
+  }
+
+  public static Matcher<SpanData> hasTraceId(String traceId) {
+    return hasTraceId(is(equalTo(traceId)));
+  }
+
+  public static Matcher<SpanData> hasTraceId(Matcher<String> matcher) {
+    return new FeatureMatcher<SpanData, String>(
+      matcher, "SpanData with a traceId that ", "traceId") {
+      @Override protected String featureValueOf(SpanData item) {
+        return item.getTraceId();
       }
     };
   }

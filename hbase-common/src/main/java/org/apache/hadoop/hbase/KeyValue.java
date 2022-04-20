@@ -1102,10 +1102,10 @@ public class KeyValue implements ExtendedCell, Cloneable {
    */
   @Override
   public KeyValue clone() throws CloneNotSupportedException {
-    super.clone();
-    byte [] b = new byte[this.length];
-    System.arraycopy(this.bytes, this.offset, b, 0, this.length);
-    KeyValue ret = new KeyValue(b, 0, b.length);
+    KeyValue ret = (KeyValue) super.clone();
+    ret.bytes = Arrays.copyOf(this.bytes, this.bytes.length);
+    ret.offset = 0;
+    ret.length = ret.bytes.length;
     // Important to clone the memstoreTS as well - otherwise memstore's
     // update-in-place methods (eg increment) will end up creating
     // new entries
@@ -1720,8 +1720,8 @@ public class KeyValue implements ExtendedCell, Cloneable {
     }
 
     @Override
-    protected Object clone() throws CloneNotSupportedException {
-      return new MetaComparator();
+    protected MetaComparator clone() throws CloneNotSupportedException {
+      return (MetaComparator) super.clone();
     }
 
     /**
@@ -2248,9 +2248,8 @@ public class KeyValue implements ExtendedCell, Cloneable {
     }
 
     @Override
-    protected Object clone() throws CloneNotSupportedException {
-      super.clone();
-      return new KVComparator();
+    protected KVComparator clone() throws CloneNotSupportedException {
+      return (KVComparator) super.clone();
     }
 
   }
@@ -2370,21 +2369,23 @@ public class KeyValue implements ExtendedCell, Cloneable {
 
   /**
    * HeapSize implementation
-   *
+   * <p/>
    * We do not count the bytes in the rowCache because it should be empty for a KeyValue in the
    * MemStore.
    */
   @Override
   public long heapSize() {
-    /*
-     * Deep object overhead for this KV consists of two parts. The first part is the KV object
-     * itself, while the second part is the backing byte[]. We will only count the array overhead
-     * from the byte[] only if this is the first KV in there.
-     */
-    return ClassSize.align(FIXED_OVERHEAD) +
-        (offset == 0
-          ? ClassSize.sizeOfByteArray(length)  // count both length and object overhead
-          : length);                           // only count the number of bytes
+    // Deep object overhead for this KV consists of two parts. The first part is the KV object
+    // itself, while the second part is the backing byte[]. We will only count the array overhead
+    // from the byte[] only if this is the first KV in there.
+    int fixed = ClassSize.align(FIXED_OVERHEAD);
+    if (offset == 0) {
+      // count both length and object overhead
+      return fixed + ClassSize.sizeOfByteArray(length);
+    } else {
+      // only count the number of bytes
+      return fixed + length;
+    }
   }
 
   /**

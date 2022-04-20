@@ -23,6 +23,7 @@ import static org.apache.hadoop.hbase.trace.HBaseSemanticAttributes.REGION_NAMES
 import static org.apache.hadoop.hbase.trace.HBaseSemanticAttributes.ROW_LOCK_READ_LOCK_KEY;
 import static org.apache.hadoop.hbase.util.ConcurrentMapUtils.computeIfAbsent;
 
+import com.google.errorprone.annotations.RestrictedApi;
 import edu.umd.cs.findbugs.annotations.Nullable;
 import io.opentelemetry.api.trace.Span;
 import java.io.EOFException;
@@ -78,7 +79,6 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.ByteBufferExtendedCell;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellComparator;
@@ -165,6 +165,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.CommonFSUtils;
+import org.apache.hadoop.hbase.util.CoprocessorConfigurationUtil;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HashedBytes;
@@ -252,6 +253,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /** Parameter name for compaction after bulkload */
   public static final String COMPACTION_AFTER_BULKLOAD_ENABLE =
       "hbase.compaction.after.bulkload.enable";
+
+  /** Config for allow split when file count greater than the configured blocking file count*/
+  public static final String SPLIT_IGNORE_BLOCKING_ENABLED_KEY =
+      "hbase.hregion.split.ignore.blocking.enabled";
 
   /**
    * This is for for using HRegion as a local storage, where we may put the recovered edits in a
@@ -582,7 +587,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   /** A result object from prepare flush cache stage */
-  static class PrepareFlushResult {
+  protected static class PrepareFlushResult {
     final FlushResultImpl result; // indicating a failure result from prepare
     final TreeMap<byte[], StoreFlushContext> storeFlushCtxs;
     final TreeMap<byte[], List<Path>> committedFiles;
@@ -706,7 +711,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private final MultiVersionConcurrencyControl mvcc;
 
   // Coprocessor host
-  private RegionCoprocessorHost coprocessorHost;
+  private volatile RegionCoprocessorHost coprocessorHost;
 
   private TableDescriptor htableDescriptor = null;
   private RegionSplitPolicy splitPolicy;
@@ -724,7 +729,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   private final StoreHotnessProtector storeHotnessProtector;
 
-  private Optional<RegionReplicationSink> regionReplicationSink = Optional.empty();
+  protected Optional<RegionReplicationSink> regionReplicationSink = Optional.empty();
 
   /**
    * HRegion constructor. This constructor should only be used for testing and
@@ -4937,11 +4942,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             boolean valueIsNull =
               comparator.getValue() == null || comparator.getValue().length == 0;
             if (result.isEmpty() && valueIsNull) {
-              matches = true;
-            } else if (result.size() > 0 && result.get(0).getValueLength() == 0 && valueIsNull) {
-              matches = true;
+              matches = op != CompareOperator.NOT_EQUAL;
+            } else if (result.size() > 0 && valueIsNull) {
+              matches = (result.get(0).getValueLength() == 0) == (op != CompareOperator.NOT_EQUAL);
               cellTs = result.get(0).getTimestamp();
-            } else if (result.size() == 1 && !valueIsNull) {
+            } else if (result.size() == 1) {
               Cell kv = result.get(0);
               cellTs = kv.getTimestamp();
               int compareResult = PrivateCellUtil.compareValue(kv, comparator);
@@ -7128,7 +7133,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
      * @return final path to be used for actual loading
      * @throws IOException
      */
-    String prepareBulkLoad(byte[] family, String srcPath, boolean copyFile)
+    String prepareBulkLoad(byte[] family, String srcPath, boolean copyFile, String customStaging)
         throws IOException;
 
     /**
@@ -7250,12 +7255,21 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           familyWithFinalPath.put(familyName, new ArrayList<>());
         }
         List<Pair<Path, Path>> lst = familyWithFinalPath.get(familyName);
+        String finalPath = path;
         try {
-          String finalPath = path;
+          boolean reqTmp = store.storeEngine.requireWritingToTmpDirFirst();
           if (bulkLoadListener != null) {
-            finalPath = bulkLoadListener.prepareBulkLoad(familyName, path, copyFile);
+            finalPath = bulkLoadListener.prepareBulkLoad(familyName, path, copyFile,
+              reqTmp ? null : regionDir.toString());
           }
-          Pair<Path, Path> pair = store.preBulkLoadHFile(finalPath, seqId);
+          Pair<Path, Path> pair = null;
+          if (reqTmp) {
+            pair = store.preBulkLoadHFile(finalPath, seqId);
+          }
+          else {
+            Path livePath = new Path(finalPath);
+            pair = new Pair<>(livePath, livePath);
+          }
           lst.add(pair);
         } catch (IOException ioe) {
           // A failure here can cause an atomicity violation that we currently
@@ -7265,7 +7279,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               " load " + Bytes.toString(p.getFirst()) + " : " + p.getSecond(), ioe);
           if (bulkLoadListener != null) {
             try {
-              bulkLoadListener.failedBulkLoad(familyName, path);
+              bulkLoadListener.failedBulkLoad(familyName, finalPath);
             } catch (Exception ex) {
               LOG.error("Error while calling failedBulkLoad for family " +
                   Bytes.toString(familyName) + " with path " + path, ex);
@@ -7857,8 +7871,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // This can be an EXPENSIVE call. It may make an extra copy from offheap to onheap buffers.
       // See more details in HBASE-26036.
       for (Cell cell : tmp) {
-        results.add(cell instanceof ByteBufferExtendedCell ?
-          ((ByteBufferExtendedCell) cell).deepClone(): cell);
+        results.add(
+          CellUtil.cloneIfNecessary(cell));
       }
     }
 
@@ -8232,6 +8246,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return The priority that this region should have in the compaction queue
    */
   public int getCompactPriority() {
+    if (checkSplit().isPresent() && conf.getBoolean(SPLIT_IGNORE_BLOCKING_ENABLED_KEY, false)) {
+      // if a region should split, split it before compact
+      return Store.PRIORITY_USER;
+    }
     return stores.values().stream().mapToInt(HStore::getCompactPriority).min()
         .orElse(Store.NO_PRIORITY);
   }
@@ -8586,6 +8604,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public void onConfigurationChange(Configuration conf) {
     this.storeHotnessProtector.update(conf);
+    // update coprocessorHost if the configuration has changed.
+    if (CoprocessorConfigurationUtil.checkConfigurationChange(getReadOnlyConfiguration(), conf,
+      CoprocessorHost.REGION_COPROCESSOR_CONF_KEY,
+      CoprocessorHost.USER_REGION_COPROCESSOR_CONF_KEY)) {
+      LOG.info("Update the system coprocessors because the configuration has changed");
+      decorateRegionConfiguration(conf);
+      this.coprocessorHost = new RegionCoprocessorHost(this, rsServices, conf);
+    }
   }
 
   /**
@@ -8724,5 +8750,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   public void addWriteRequestsCount(long writeRequestsCount) {
     this.writeRequestsCount.add(writeRequestsCount);
+  }
+
+  @RestrictedApi(explanation = "Should only be called in tests", link = "",
+      allowedOnPath = ".*/src/test/.*")
+  boolean isReadsEnabled() {
+    return this.writestate.readsEnabled;
   }
 }

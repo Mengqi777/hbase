@@ -41,6 +41,9 @@ public class ExceptionTrackingSourceImpl extends BaseSourceImpl
   protected MutableFastCounter exceptionsQuotaExceeded;
   protected MutableFastCounter exceptionsRpcThrottling;
   protected MutableFastCounter exceptionsCallDropped;
+  protected MutableFastCounter exceptionsCallTimedOut;
+  protected MutableFastCounter exceptionRequestTooBig;
+  protected MutableFastCounter otherExceptions;
 
   public ExceptionTrackingSourceImpl(String metricsName, String metricsDescription,
                                      String metricsContext, String metricsJmxContext) {
@@ -75,6 +78,12 @@ public class ExceptionTrackingSourceImpl extends BaseSourceImpl
       .newCounter(EXCEPTIONS_RPC_THROTTLING, EXCEPTIONS_TYPE_DESC, 0L);
     this.exceptionsCallDropped = this.getMetricsRegistry()
       .newCounter(EXCEPTIONS_CALL_DROPPED, EXCEPTIONS_TYPE_DESC, 0L);
+    this.exceptionsCallTimedOut = this.getMetricsRegistry()
+      .newCounter(EXCEPTIONS_CALL_TIMED_OUT, EXCEPTIONS_TYPE_DESC, 0L);
+    this.exceptionRequestTooBig = this.getMetricsRegistry()
+      .newCounter(EXCEPTIONS_REQUEST_TOO_BIG, EXCEPTIONS_TYPE_DESC, 0L);
+    this.otherExceptions = this.getMetricsRegistry()
+      .newCounter(OTHER_EXCEPTIONS, EXCEPTIONS_TYPE_DESC, 0L);
   }
 
   @Override
@@ -140,5 +149,20 @@ public class ExceptionTrackingSourceImpl extends BaseSourceImpl
   @Override
   public void callDroppedException() {
     exceptionsCallDropped.incr();
+  }
+
+  @Override
+  public void callTimedOut() {
+    exceptionsCallTimedOut.incr();
+  }
+
+  @Override
+  public void requestTooBigException() {
+    exceptionRequestTooBig.incr();
+  }
+
+  @Override
+  public void otherExceptions() {
+    otherExceptions.incr();
   }
 }

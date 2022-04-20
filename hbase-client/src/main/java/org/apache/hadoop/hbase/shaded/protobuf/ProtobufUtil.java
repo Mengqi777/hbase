@@ -67,6 +67,8 @@ import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.ServerTask;
+import org.apache.hadoop.hbase.ServerTaskBuilder;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Append;
 import org.apache.hadoop.hbase.client.BalanceResponse;
@@ -836,10 +838,7 @@ public final class ProtobufUtil {
           if (qv.hasQualifier()) {
             qualifier = qv.getQualifier().toByteArray();
           }
-          long ts = HConstants.LATEST_TIMESTAMP;
-          if (qv.hasTimestamp()) {
-            ts = qv.getTimestamp();
-          }
+          long ts = cellTimestampOrLatest(qv);
           if (deleteType == DeleteType.DELETE_ONE_VERSION) {
             delete.addColumn(family, qualifier, ts);
           } else if (deleteType == DeleteType.DELETE_MULTIPLE_VERSIONS) {
@@ -906,7 +905,7 @@ public final class ProtobufUtil {
                   .setRow(mutation.getRow())
                   .setFamily(family)
                   .setQualifier(qualifier)
-                  .setTimestamp(qv.getTimestamp())
+                  .setTimestamp(cellTimestampOrLatest(qv))
                   .setType(KeyValue.Type.Put.getCode())
                   .setValue(value)
                   .setTags(tags)
@@ -919,6 +918,14 @@ public final class ProtobufUtil {
       mutation.setAttribute(attribute.getName(), attribute.getValue().toByteArray());
     }
     return mutation;
+  }
+
+  private static long cellTimestampOrLatest(QualifierValue cell) {
+    if (cell.hasTimestamp()) {
+      return cell.getTimestamp();
+    } else {
+      return HConstants.LATEST_TIMESTAMP;
+    }
   }
 
   /**
@@ -2997,9 +3004,7 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Creates {@link CompactionState} from
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoResponse.CompactionState}
-   * state
+   * Creates {@link CompactionState} from {@link GetRegionInfoResponse.CompactionState} state
    * @param state the protobuf CompactionState
    * @return CompactionState
    */
@@ -3012,9 +3017,7 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Creates {@link CompactionState} from
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos
-   * .RegionLoad.CompactionState} state
+   * Creates {@link CompactionState} from {@link RegionLoad.CompactionState} state
    * @param state the protobuf CompactionState
    * @return CompactionState
    */
@@ -3034,9 +3037,7 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Creates
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription.Type}
-   * from {@link SnapshotType}
+   * Creates {@link SnapshotProtos.SnapshotDescription.Type} from {@link SnapshotType}
    * @param type the SnapshotDescription type
    * @return the protobuf SnapshotDescription type
    */
@@ -3046,9 +3047,8 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Creates
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription.Type}
-   * from the type of SnapshotDescription string
+   * Creates {@link SnapshotProtos.SnapshotDescription.Type} from the type of SnapshotDescription
+   * string
    * @param snapshotDesc string representing the snapshot description type
    * @return the protobuf SnapshotDescription type
    */
@@ -3058,18 +3058,16 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Creates {@link SnapshotType} from the
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription.Type}
-   * @param type the snapshot description type
-   * @return the protobuf SnapshotDescription type
+   * Creates {@link SnapshotType} from the {@link SnapshotProtos.SnapshotDescription.Type}
+   * @param  type the snapshot description type
+   * @return      the protobuf SnapshotDescription type
    */
   public static SnapshotType createSnapshotType(SnapshotProtos.SnapshotDescription.Type type) {
     return SnapshotType.valueOf(type.toString());
   }
 
   /**
-   * Convert from {@link SnapshotDescription} to
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription}
+   * Convert from {@link SnapshotDescription} to {@link SnapshotProtos.SnapshotDescription}
    * @param snapshotDesc the POJO SnapshotDescription
    * @return the protobuf SnapshotDescription
    */
@@ -3103,9 +3101,7 @@ public final class ProtobufUtil {
   }
 
   /**
-   * Convert from
-   * {@link org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription} to
-   * {@link SnapshotDescription}
+   * Convert from {@link SnapshotProtos.SnapshotDescription} to {@link SnapshotDescription}
    * @param snapshotDesc the protobuf SnapshotDescription
    * @return the POJO SnapshotDescription
    */
@@ -3897,6 +3893,26 @@ public final class ProtobufUtil {
       .setBalancerRan(response.hasBalancerRan() && response.getBalancerRan())
       .setMovesCalculated(response.hasMovesCalculated() ? response.getMovesExecuted() : 0)
       .setMovesExecuted(response.hasMovesExecuted() ? response.getMovesExecuted() : 0)
+      .build();
+  }
+
+  public static ServerTask getServerTask(ClusterStatusProtos.ServerTask task) {
+    return ServerTaskBuilder.newBuilder()
+      .setDescription(task.getDescription())
+      .setStatus(task.getStatus())
+      .setState(ServerTask.State.valueOf(task.getState().name()))
+      .setStartTime(task.getStartTime())
+      .setCompletionTime(task.getCompletionTime())
+      .build();
+  }
+
+  public static ClusterStatusProtos.ServerTask toServerTask(ServerTask task) {
+    return ClusterStatusProtos.ServerTask.newBuilder()
+      .setDescription(task.getDescription())
+      .setStatus(task.getStatus())
+      .setState(ClusterStatusProtos.ServerTask.State.valueOf(task.getState().name()))
+      .setStartTime(task.getStartTime())
+      .setCompletionTime(task.getCompletionTime())
       .build();
   }
 

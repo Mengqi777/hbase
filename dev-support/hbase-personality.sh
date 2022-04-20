@@ -119,6 +119,18 @@ function personality_parse_args
         delete_parameter "${i}"
         ASF_NIGHTLIES_GENERAL_CHECK_BASE=${i#*=}
       ;;
+      --build-thread=*)
+        delete_parameter "${i}"
+        BUILD_THREAD=${i#*=}
+      ;;
+      --surefire-first-part-fork-count=*)
+        delete_parameter "${i}"
+        SUREFIRE_FIRST_PART_FORK_COUNT=${i#*=}
+      ;;
+      --surefire-second-part-fork-count=*)
+        delete_parameter "${i}"
+        SUREFIRE_SECOND_PART_FORK_COUNT=${i#*=}
+      ;;
     esac
   done
 }
@@ -144,7 +156,19 @@ function personality_modules
   # At a few points, hbase modules can run build, test, etc. in parallel
   # Let it happen. Means we'll use more CPU but should be for short bursts.
   # https://cwiki.apache.org/confluence/display/MAVEN/Parallel+builds+in+Maven+3
-  extra="--threads=2 -DHBasePatchProcess"
+  if [[ -n "${BUILD_THREAD}" ]]; then
+    extra="--threads=${BUILD_THREAD}"
+  else
+    extra="--threads=2"
+  fi
+
+  # Set java.io.tmpdir to avoid exhausting the /tmp space
+  # Just simply set to 'target', it is not very critical so we do not care
+  # whether it is placed in the root directory or a sub module's directory
+  # let's make it absolute
+  tmpdir=$(realpath target)
+  extra="${extra} -Djava.io.tmpdir=${tmpdir} -DHBasePatchProcess"
+
   if [[ "${PATCH_BRANCH}" = branch-1* ]]; then
     extra="${extra} -Dhttps.protocols=TLSv1.2"
   fi
@@ -230,6 +254,15 @@ function personality_modules
     # Used by zombie detection stuff, even though we're not including that yet.
     if [ -n "${BUILD_ID}" ]; then
       extra="${extra} -Dbuild.id=${BUILD_ID}"
+    fi
+
+    # set forkCount
+    if [[ -n "${SUREFIRE_FIRST_PART_FORK_COUNT}" ]]; then
+      extra="${extra} -Dsurefire.firstPartForkCount=${SUREFIRE_FIRST_PART_FORK_COUNT}"
+    fi
+
+    if [[ -n "${SUREFIRE_SECOND_PART_FORK_COUNT}" ]]; then
+      extra="${extra} -Dsurefire.secondPartForkCount=${SUREFIRE_SECOND_PART_FORK_COUNT}"
     fi
 
     # If the set of changed files includes CommonFSUtils then add the hbase-server
@@ -467,7 +500,7 @@ function shadedjars_rebuild
 
   local -a maven_args=('clean' 'verify' '-fae' '--batch-mode'
     '-pl' 'hbase-shaded/hbase-shaded-check-invariants' '-am'
-    '-Dtest=NoUnitTests' '-DHBasePatchProcess' '-Prelease'
+    '-DskipTests' '-DHBasePatchProcess' '-Prelease'
     '-Dmaven.javadoc.skip=true' '-Dcheckstyle.skip=true' '-Dspotbugs.skip=true')
   # If we have HADOOP_PROFILE specified and we're on branch-2.x, pass along
   # the hadoop.profile system property. Ensures that Hadoop2 and Hadoop3

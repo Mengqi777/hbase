@@ -49,13 +49,13 @@ import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.stream.Collectors;
 import javax.management.MalformedObjectNameException;
 import javax.servlet.http.HttpServlet;
-import org.apache.commons.lang3.RandomUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -105,6 +105,7 @@ import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.ipc.ServerRpcController;
 import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.mob.MobFileCache;
+import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.namequeues.NamedQueueRecorder;
 import org.apache.hadoop.hbase.namequeues.SlowLogTableOpsChore;
 import org.apache.hadoop.hbase.net.Address;
@@ -138,6 +139,7 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CompressionTest;
+import org.apache.hadoop.hbase.util.CoprocessorConfigurationUtil;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.FutureUtils;
@@ -322,6 +324,8 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
 
   private JvmPauseMonitor pauseMonitor;
 
+  private RSSnapshotVerifier rsSnapshotVerifier;
+
   /** region server process name */
   public static final String REGIONSERVER = "regionserver";
 
@@ -406,7 +410,7 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
   // chore for refreshing store files for secondary regions
   private StorefileRefresherChore storefileRefresher;
 
-  private RegionServerCoprocessorHost rsHost;
+  private volatile RegionServerCoprocessorHost rsHost;
 
   private RegionServerProcedureManagerHost rspmHost;
 
@@ -499,6 +503,8 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
 
       blockCache = BlockCacheFactory.createBlockCache(conf);
       mobFileCache = new MobFileCache(conf);
+
+      rsSnapshotVerifier = new RSSnapshotVerifier(conf);
 
       uncaughtExceptionHandler =
         (t, e) -> abort("Uncaught exception in executorService thread " + t.getName(), e);
@@ -1195,6 +1201,15 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
       }
     }
 
+    TaskMonitor.get().getTasks().forEach(task ->
+      serverLoad.addTasks(ClusterStatusProtos.ServerTask.newBuilder()
+        .setDescription(task.getDescription())
+        .setStatus(task.getStatus() != null ? task.getStatus() : "")
+        .setState(ClusterStatusProtos.ServerTask.State.valueOf(task.getState().name()))
+        .setStartTime(task.getStartTime())
+        .setCompletionTime(task.getCompletionTimestamp())
+        .build()));
+
     return serverLoad.build();
   }
 
@@ -1644,14 +1659,14 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
         if (r.shouldFlush(whyFlush)) {
           FlushRequester requester = server.getFlushRequester();
           if (requester != null) {
-            long randomDelay = RandomUtils.nextLong(0, rangeOfDelayMs) + MIN_DELAY_TIME;
+            long delay = ThreadLocalRandom.current().nextLong(rangeOfDelayMs) + MIN_DELAY_TIME;
             //Throttle the flushes by putting a delay. If we don't throttle, and there
             //is a balanced write-load on the regions in a table, we might end up
             //overwhelming the filesystem with too many flushes at once.
-            if (requester.requestDelayedFlush(r, randomDelay)) {
+            if (requester.requestDelayedFlush(r, delay)) {
               LOG.info("{} requesting flush of {} because {} after random delay {} ms",
                   getName(), r.getRegionInfo().getRegionNameAsString(),  whyFlush.toString(),
-                  randomDelay);
+                  delay);
             }
           }
         }
@@ -1828,6 +1843,10 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
       conf.getInt("hbase.regionserver.executor.claim.replication.queue.threads", 1);
     executorService.startExecutorService(executorService.new ExecutorConfig().setExecutorType(
         ExecutorType.RS_CLAIM_REPLICATION_QUEUE).setCorePoolSize(claimReplicationQueueThreads));
+    final int rsSnapshotOperationThreads =
+      conf.getInt("hbase.regionserver.executor.snapshot.operations.threads", 3);
+    executorService.startExecutorService(executorService.new ExecutorConfig().setExecutorType(
+      ExecutorType.RS_SNAPSHOT_OPERATIONS).setCorePoolSize(rsSnapshotOperationThreads));
 
     Threads.setDaemonThreadRunning(this.walRoller, getName() + ".logRoller",
         uncaughtExceptionHandler);
@@ -1953,7 +1972,8 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
     double brokenStoreFileCleanerDelayJitter = conf.getDouble(
       BrokenStoreFileCleaner.BROKEN_STOREFILE_CLEANER_DELAY_JITTER,
       BrokenStoreFileCleaner.DEFAULT_BROKEN_STOREFILE_CLEANER_DELAY_JITTER);
-    double jitterRate = (RandomUtils.nextDouble() - 0.5D) * brokenStoreFileCleanerDelayJitter;
+    double jitterRate = (ThreadLocalRandom.current().nextDouble() - 0.5D) *
+      brokenStoreFileCleanerDelayJitter;
     long jitterValue = Math.round(brokenStoreFileCleanerDelay * jitterRate);
     this.brokenStoreFileCleaner =
       new BrokenStoreFileCleaner((int) (brokenStoreFileCleanerDelay + jitterValue),
@@ -2220,7 +2240,13 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
     }
     TableName tn = region.getTableDescriptor().getTableName();
     if (!ServerRegionReplicaUtil.isRegionReplicaReplicationEnabled(region.conf, tn) ||
-        !ServerRegionReplicaUtil.isRegionReplicaWaitForPrimaryFlushEnabled(region.conf)) {
+        !ServerRegionReplicaUtil.isRegionReplicaWaitForPrimaryFlushEnabled(region.conf) ||
+        // If the memstore replication not setup, we do not have to wait for observing a flush event
+        // from primary before starting to serve reads, because gaps from replication is not
+        // applicable,this logic is from
+        // TableDescriptorBuilder.ModifyableTableDescriptor.setRegionMemStoreReplication by
+        // HBASE-13063
+        !region.getTableDescriptor().hasRegionMemStoreReplication()) {
       region.setReadsEnabled(true);
       return;
     }
@@ -3323,6 +3349,13 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
     } catch (IOException e) {
       LOG.warn("Failed to initialize SuperUsers on reloading of the configuration");
     }
+
+    // update region server coprocessor if the configuration has changed.
+    if (CoprocessorConfigurationUtil.checkConfigurationChange(getConfiguration(), newConf,
+      CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY)) {
+      LOG.info("Update region server coprocessors because the configuration has changed");
+      this.rsHost = new RegionServerCoprocessorHost(this, newConf);
+    }
   }
 
   @Override
@@ -3536,6 +3569,10 @@ public class HRegionServer extends HBaseServerBase<RSRpcServices>
   @InterfaceAudience.Private
   public BrokenStoreFileCleaner getBrokenStoreFileCleaner(){
     return brokenStoreFileCleaner;
+  }
+
+  RSSnapshotVerifier getRsSnapshotVerifier() {
+    return rsSnapshotVerifier;
   }
 
   @Override

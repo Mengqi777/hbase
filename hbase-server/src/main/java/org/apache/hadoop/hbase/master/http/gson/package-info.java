@@ -1,6 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!--
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,19 +15,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
--->
-<Configuration>
-  <Appenders>
-    <!-- Console appender -->
-    <Console name="console" target="SYSTEM_ERR">
-      <PatternLayout pattern="%d{ISO8601} %-5p [%t] %c{2}: %.1000m%n" />
-    </Console>
-  </Appenders>
-  <Loggers>
-    <Root level="warn">
-      <AppenderRef ref="console" />
-    </Root>
-    <!-- ZooKeeper will still put stuff at WARN -->
-    <Logger name="org.apache.zookeeper" level="error" />
-  </Loggers>
-</Configuration>
+
+/**
+ * This package should be in the hbase-http module as {@code a.a.h.h.http.gson}. It is here instead
+ * because hbase-http does not currently have a dependency on hbase-client, which is required for
+ * implementing {@link org.apache.hadoop.hbase.master.http.gson.SizeAsBytesSerializer}.
+ */
+package org.apache.hadoop.hbase.master.http.gson;
